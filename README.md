@@ -1,5 +1,16 @@
 # errand-langgraph
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/jmiguelmangas/errand-langgraph/main/assets/logo.png" alt="errand-langgraph logo" width="200">
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/errand-langgraph/"><img src="https://img.shields.io/pypi/v/errand-langgraph.svg" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/errand-langgraph/"><img src="https://img.shields.io/pypi/pyversions/errand-langgraph.svg" alt="Supported Python versions"></a>
+  <a href="https://github.com/jmiguelmangas/errand-langgraph/actions/workflows/ci.yml"><img src="https://github.com/jmiguelmangas/errand-langgraph/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/jmiguelmangas/errand-langgraph/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/errand-langgraph.svg" alt="License"></a>
+</p>
+
 Run [LangGraph](https://github.com/langchain-ai/langgraph) graphs as
 [errand](https://github.com/jmiguelmangas/errand) jobs: background execution
 with status polling, human-in-the-loop resume, event streaming, and an
