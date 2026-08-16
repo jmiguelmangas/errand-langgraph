@@ -15,11 +15,11 @@ not shared across runners, same lifetime as the graph it indexes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class RunState(str, Enum):
+class RunState(StrEnum):
     """Lifecycle state of a run, finer-grained than errand's ``JobStatus``.
 
     ``INTERRUPTED`` has no equivalent in ``errand_jobs.JobStatus`` -- the

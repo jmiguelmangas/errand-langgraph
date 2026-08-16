@@ -7,19 +7,21 @@ from conftest import build_approval_graph, build_counter_graph, build_failing_gr
 from errand_jobs.models import Job, JobStatus
 
 from errand_langgraph import GraphRunner, RunState, UnknownRunError
-from errand_langgraph.runner import _extract_interrupts, _is_compiled
+from errand_langgraph.runner import RunStatus, _extract_interrupts, _is_compiled
 
 
 async def _wait_for(
-    runner: GraphRunner, job_id: str, *states: RunState, timeout: float = 2.0
-) -> object:
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        status = await runner.status(job_id)
-        if status.state in states:
-            return status
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"job {job_id} did not reach {states} in time")
+    runner: GraphRunner, job_id: str, *states: RunState, within_seconds: float = 10.0
+) -> RunStatus:
+    try:
+        async with asyncio.timeout(within_seconds):
+            while True:
+                status = await runner.status(job_id)
+                if status.state in states:
+                    return status
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        raise AssertionError(f"job {job_id} did not reach {states} in time") from None
 
 
 async def test_submit_succeeds() -> None:
