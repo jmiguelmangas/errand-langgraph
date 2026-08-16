@@ -3,11 +3,19 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from conftest import build_approval_graph, build_counter_graph, build_failing_graph
+from conftest import (
+    build_approval_graph,
+    build_counter_graph,
+    build_failing_graph,
+    build_flaky_graph,
+)
 from errand_jobs.models import Job, JobStatus
 
 from errand_langgraph import GraphRunner, RunState, UnknownRunError
+from errand_langgraph.retry import RetryPolicy
 from errand_langgraph.runner import RunStatus, _extract_interrupts, _is_compiled
+
+_FAST_RETRY = RetryPolicy(max_attempts=3, base_delay=0.001, max_delay=0.01)
 
 
 async def _wait_for(
@@ -308,5 +316,126 @@ async def test_stream_events_closes_on_interrupt() -> None:
         assert events[-1]["data"]["value"] == 2
         status = await runner.status(handle.job_id)
         assert status.state == RunState.INTERRUPTED
+    finally:
+        await runner.shutdown()
+
+
+async def test_retry_resumes_from_checkpoint_without_rerunning_completed_nodes() -> (
+    None
+):
+    graph, call_counts = build_flaky_graph(fail_times=2)
+    runner = GraphRunner(graph, retry=_FAST_RETRY)
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+        status = await _wait_for(
+            runner, handle.job_id, RunState.SUCCEEDED, RunState.FAILED
+        )
+
+        assert status.state == RunState.SUCCEEDED
+        assert status.result == {"value": 102}
+        # increment ran once, ever -- resume-from-checkpoint means it's
+        # never re-executed across the 2 retries flaky needed.
+        assert call_counts["increment"] == 1
+        assert call_counts["flaky"] == 3
+    finally:
+        await runner.shutdown()
+
+
+async def test_retry_without_checkpointer_restarts_from_scratch() -> None:
+    graph, call_counts = build_flaky_graph(fail_times=2, with_checkpointer=False)
+    with pytest.warns(UserWarning, match="no checkpointer"):
+        runner = GraphRunner(graph, retry=_FAST_RETRY)
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+        status = await _wait_for(
+            runner, handle.job_id, RunState.SUCCEEDED, RunState.FAILED
+        )
+
+        assert status.state == RunState.SUCCEEDED
+        # No checkpoint to resume from -- every attempt re-sends the
+        # original payload, so increment re-runs each time too.
+        assert call_counts["increment"] == 3
+        assert call_counts["flaky"] == 3
+    finally:
+        await runner.shutdown()
+
+
+async def test_retry_exhausted_marks_failed() -> None:
+    graph, call_counts = build_flaky_graph(fail_times=10)
+    runner = GraphRunner(
+        graph, retry=RetryPolicy(max_attempts=2, base_delay=0.001, max_delay=0.01)
+    )
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+        status = await _wait_for(runner, handle.job_id, RunState.FAILED)
+
+        assert status.state == RunState.FAILED
+        assert status.error is not None
+        assert "TimeoutError" in status.error
+        assert call_counts["flaky"] == 2  # exactly max_attempts, not more
+    finally:
+        await runner.shutdown()
+
+
+async def test_retry_publishes_a_retry_event() -> None:
+    graph, _call_counts = build_flaky_graph(fail_times=1)
+    runner = GraphRunner(graph, retry=_FAST_RETRY)
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+
+        events = [event async for event in runner.stream_events(handle.job_id)]
+
+        retry_events = [e for e in events if e["type"] == "retry"]
+        assert len(retry_events) == 1
+        assert retry_events[0]["data"]["attempt"] == 1
+        assert "TimeoutError" in retry_events[0]["data"]["error"]
+    finally:
+        await runner.shutdown()
+
+
+async def test_non_retryable_exception_fails_on_first_attempt() -> None:
+    runner = GraphRunner(build_failing_graph(), retry=_FAST_RETRY)
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+        status = await _wait_for(runner, handle.job_id, RunState.FAILED)
+        assert status.state == RunState.FAILED
+    finally:
+        await runner.shutdown()
+
+
+def test_no_checkpointer_with_retries_enabled_warns() -> None:
+    with pytest.warns(UserWarning, match="no checkpointer"):
+        GraphRunner(build_counter_graph(with_checkpointer=False))
+
+
+def test_no_checkpointer_with_retries_disabled_does_not_warn() -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        GraphRunner(
+            build_counter_graph(with_checkpointer=False),
+            retry=RetryPolicy(max_attempts=1),
+        )
+
+
+async def test_interrupt_detection_without_a_checkpointer() -> None:
+    # aget_state needs a checkpointer (verified -- ValueError("No
+    # checkpointer set") otherwise), so without one, interrupt detection
+    # falls back to the __interrupt__ key astream's own chunks carry.
+    with pytest.warns(UserWarning, match="no checkpointer"):
+        runner = GraphRunner(build_approval_graph(with_checkpointer=False))
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1, "approved": False})
+        status = await _wait_for(runner, handle.job_id, RunState.INTERRUPTED)
+
+        assert status.result is None
+        assert status.interrupt[0]["value"] == {"question": "approve?", "value": 2}
     finally:
         await runner.shutdown()

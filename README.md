@@ -13,13 +13,14 @@
 
 Run [LangGraph](https://github.com/langchain-ai/langgraph) graphs as
 [errand](https://github.com/jmiguelmangas/errand) jobs: background execution
-with status polling, human-in-the-loop resume, event streaming, and an
-auto-generated FastAPI router — no Celery, no separate broker.
+with status polling, human-in-the-loop resume, event streaming, smart
+retries, and an auto-generated FastAPI router — no Celery, no separate
+broker.
 
 > **Status:** early development, not yet released to PyPI. 0.1
-> (submit/status + the FastAPI router), 0.2 (human-in-the-loop resume), and
-> 0.3 (SSE streaming) are implemented; smart retries are in progress — see
-> the roadmap below.
+> (submit/status + the FastAPI router), 0.2 (human-in-the-loop resume), 0.3
+> (SSE streaming), and 0.4 (smart retries) are all implemented — see the
+> roadmap below. Release polish (0.5) is what's left before a PyPI publish.
 
 **Requires Python 3.11+.** `interrupt()` is broken under Python 3.10 in
 recent `langgraph` releases (a real, verified upstream bug, not a guess —
@@ -34,6 +35,12 @@ validation silently falls back to an unvalidated `dict[str, Any]` if you get
 this wrong (with a warning telling you why). `from typing_extensions import
 TypedDict, NotRequired` avoids it entirely and works the same on every
 supported Python version.
+
+**Pass a checkpointer.** Without one, retries re-run the whole graph from
+scratch instead of resuming (`GraphRunner` warns at construction time), and
+interrupt detection falls back to a less robust signal (still correct, just
+more exposed to LangGraph's own internal changes across versions — see
+`runner.py`'s docstring). HITL and efficient retries both assume one.
 
 ## Install
 
@@ -110,6 +117,33 @@ See `examples/basic/` for a runnable submit/poll version, `examples/hitl/`
 for the full interrupt/resume cycle, and `examples/streaming/` for SSE —
 all three actually run end to end (server + client, no LLM calls).
 
+**Retries** are configured with a `RetryPolicy`:
+
+```python
+from errand_langgraph import GraphRunner, RetryPolicy
+
+runner = GraphRunner(
+    graph,
+    checkpointer=InMemorySaver(),
+    retry=RetryPolicy(max_attempts=5, base_delay=1.0, max_delay=30.0),
+)
+```
+
+The default policy (3 attempts, exponential backoff with full jitter)
+retries timeouts, connection errors, and HTTP 429/5xx — duck-typed off a
+`status_code` attribute so it works with any HTTP-based provider SDK
+without importing it. Everything else (state-validation errors,
+`GraphRecursionError`, auth errors, a tool's own exceptions) isn't retried
+by default. With a checkpointer, a retry resumes from the last completed
+node instead of re-running the graph — pass your own `is_retryable`
+predicate for anything more specific:
+
+```python
+RetryPolicy(is_retryable=lambda exc: isinstance(exc, MyProviderRateLimitError))
+```
+
+Pass `RetryPolicy(max_attempts=1)` to disable retrying entirely.
+
 **Don't forget startup.** Nothing runs submitted work without a running
 worker pool — wire `lifespan=runner.lifespan` into `FastAPI(...)` (as above)
 or call `await runner.startup()` yourself before submitting. `submit()`/
@@ -132,8 +166,9 @@ not all).
   `POST /runs/{id}/resume`, thread state/history endpoints.
 - **0.3 (done):** SSE streaming of graph events (in-process only —
   documented above, not hidden).
-- **0.4:** smart retries — resume from the last checkpoint instead of
-  re-running the graph (and re-paying for every LLM call) from scratch.
+- **0.4 (done):** smart retries — error classification, backoff with full
+  jitter, resume from the last checkpoint instead of re-running the graph
+  (and re-paying for every LLM call) from scratch.
 
 ## License
 

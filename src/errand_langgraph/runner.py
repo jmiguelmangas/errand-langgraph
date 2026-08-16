@@ -23,10 +23,23 @@ chunk is exactly what ``ainvoke`` would have returned, letting one pass
 serve both :meth:`GraphRunner.status`'s result and
 :meth:`GraphRunner.stream_events`'s events without running the graph
 twice.
+
+Retries (DESIGN.md sec 7, see retry.py) are this package's own loop
+around that same ``astream`` call, not errand's native retry. On a
+retryable exception, the next attempt passes ``payload=None`` when a
+checkpointer is configured -- verified against a real compiled graph +
+``InMemorySaver`` that this resumes only the node that failed, not the
+whole graph (the checkpointer already has every earlier node's output).
+Without a checkpointer there's nothing to resume from, so the next
+attempt re-sends the original ``payload`` instead and restarts from
+scratch -- less efficient, but still able to succeed past a transient
+error; :class:`GraphRunner` warns about this once, at construction time,
+rather than silently degrading.
 """
 
 from __future__ import annotations
 
+import asyncio
 import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -37,6 +50,7 @@ from errand_jobs import Errand, JobStatus
 from langgraph.types import Command
 
 from .events import EventBus
+from .retry import RetryPolicy
 from .state import RunIndex, RunRecord, RunState
 
 if TYPE_CHECKING:
@@ -111,6 +125,12 @@ class GraphRunner:
     one across multiple ``GraphRunner``s to share a worker pool). Owns no
     worker pool of its own: :meth:`startup`/:meth:`shutdown`/:meth:`lifespan`
     just delegate to it.
+
+    ``retry`` (see retry.py) controls how many attempts a run gets and which
+    exceptions count as worth retrying at all; defaults to
+    ``RetryPolicy()`` -- 3 attempts, generic timeout/connection/HTTP-429-5xx
+    classification. Pass ``RetryPolicy(max_attempts=1)`` to disable
+    retrying entirely.
     """
 
     def __init__(
@@ -119,6 +139,7 @@ class GraphRunner:
         *,
         checkpointer: Any = None,
         errand: Errand | None = None,
+        retry: RetryPolicy | None = None,
     ) -> None:
         if _is_compiled(graph):
             if checkpointer is not None:
@@ -129,6 +150,18 @@ class GraphRunner:
             self._graph = graph
         else:
             self._graph = graph.compile(checkpointer=checkpointer)
+
+        self._retry = retry if retry is not None else RetryPolicy()
+        self._has_checkpointer = self._graph.checkpointer is not None
+        if not self._has_checkpointer and self._retry.max_attempts > 1:
+            warnings.warn(
+                "GraphRunner has no checkpointer configured: retries "
+                f"(max_attempts={self._retry.max_attempts}) will re-run the "
+                "whole graph from scratch on each attempt instead of resuming "
+                "from where it failed. Pass a checkpointer, or "
+                "RetryPolicy(max_attempts=1) to make this intentional.",
+                stacklevel=2,
+            )
 
         self._index = RunIndex()
         self._events = EventBus()
@@ -307,23 +340,62 @@ class GraphRunner:
         record.state = RunState.RUNNING
 
         config = {"configurable": {"thread_id": thread_id}}
-        last_values: dict[str, Any] = {}
-        try:
-            async for chunk in self._graph.astream(
-                payload, config=config, stream_mode="values"
-            ):
-                last_values = chunk
-                self._events.publish(job_id, {"type": "values", "data": chunk})
-        except Exception as exc:
-            record.state = RunState.FAILED
-            record.error = f"{type(exc).__name__}: {exc}"
-            self._events.close(job_id)
-            raise
+        attempt = 0
+        current_payload = payload
+        while True:
+            attempt += 1
+            try:
+                return await self._run_attempt(job_id, record, current_payload, config)
+            except Exception as exc:
+                if not self._should_retry(exc, attempt):
+                    record.state = RunState.FAILED
+                    record.error = f"{type(exc).__name__}: {exc}"
+                    self._events.close(job_id)
+                    raise
+                # record.error stays None through a retry that hasn't
+                # exhausted its attempts yet -- it's reserved for the
+                # terminal failure reason (RunStatus's documented
+                # contract), not transient in-flight state. The event
+                # stream is the right channel for that instead.
+                self._events.publish(
+                    job_id,
+                    {
+                        "type": "retry",
+                        "data": {
+                            "attempt": attempt,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    },
+                )
+                await asyncio.sleep(self._retry.delay_for(attempt))
+                # Resume from the last checkpoint when there is one; without
+                # one, the only option is to re-send the original payload
+                # and restart from scratch (warned about at construction).
+                current_payload = None if self._has_checkpointer else payload
 
-        snapshot = await self._graph.aget_state(config)
-        if snapshot.next:
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return attempt < self._retry.max_attempts and self._retry.is_retryable(exc)
+
+    async def _run_attempt(
+        self,
+        job_id: str,
+        record: RunRecord,
+        payload: Any,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        last_values: dict[str, Any] = {}
+        async for chunk in self._graph.astream(
+            payload, config=config, stream_mode="values"
+        ):
+            last_values = chunk
+            self._events.publish(job_id, {"type": "values", "data": chunk})
+
+        interrupted, interrupt_payload = await self._detect_interrupt(
+            config, last_values
+        )
+        if interrupted:
             record.state = RunState.INTERRUPTED
-            record.interrupt = _extract_interrupts(snapshot)
+            record.interrupt = interrupt_payload
         else:
             record.state = RunState.SUCCEEDED
             record.result = {
@@ -331,6 +403,24 @@ class GraphRunner:
             }
         self._events.close(job_id)
         return last_values
+
+    async def _detect_interrupt(
+        self, config: dict[str, Any], last_values: dict[str, Any]
+    ) -> tuple[bool, list[dict[str, Any]] | None]:
+        # aget_state (the more robust, version-independent signal -- see
+        # this module's docstring) needs a checkpointer: verified it raises
+        # ValueError("No checkpointer set") otherwise, a real bug this
+        # caught (M5's no-checkpointer retry test), not a guess. Without
+        # one, fall back to the __interrupt__ key astream's own "values"
+        # chunks carry -- verified that key survives even with no
+        # checkpointer configured, unlike aget_state.
+        if self._has_checkpointer:
+            snapshot = await self._graph.aget_state(config)
+            return bool(snapshot.next), _extract_interrupts(snapshot)
+        interrupts = last_values.get("__interrupt__")
+        if not interrupts:
+            return False, None
+        return True, [{"id": i.id, "value": i.value} for i in interrupts]
 
     async def startup(self) -> None:
         """Start the underlying errand worker pool. Call once, before submitting."""
