@@ -7,7 +7,7 @@ execution/checkpoint/interrupt machinery, not any model.
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -16,7 +16,9 @@ from langgraph.types import interrupt
 
 class CounterState(TypedDict):
     value: int
-    approved: bool
+    # Only the approval graph's nodes touch this -- NotRequired so the
+    # counter/failing graphs' schema-derived request bodies don't demand it.
+    approved: NotRequired[bool]
 
 
 def build_counter_graph(*, with_checkpointer: bool = True) -> Any:
