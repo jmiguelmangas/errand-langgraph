@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from errand_jobs import Errand, JobStatus
+from langgraph.types import Command
 
 from .state import RunIndex, RunRecord, RunState
 
@@ -129,10 +130,10 @@ class GraphRunner:
         # sets an attribute on the callable it registers, which bound
         # methods don't allow (no __dict__ of their own).
         async def _task_entry(
-            *, job_id: str, graph_input: dict[str, Any] | None, thread_id: str
+            *, job_id: str, payload: Any, thread_id: str
         ) -> dict[str, Any]:
             return await self._run_graph(
-                job_id=job_id, graph_input=graph_input, thread_id=thread_id
+                job_id=job_id, payload=payload, thread_id=thread_id
             )
 
         self._errand.task(name=self._task_name, max_retries=0)(_task_entry)
@@ -147,29 +148,59 @@ class GraphRunner:
         rather than starting a new one (resuming after an ``interrupt()``
         uses :meth:`resume` instead, not a second call to this method).
         """
-        if not self._started:
-            warnings.warn(
-                "GraphRunner.submit() called before startup() -- the run "
-                "will stay queued forever with no worker to pick it up. "
-                "Call `await runner.startup()`, or pass `lifespan=runner.lifespan` "
-                "to FastAPI(...) if you're using mount_graph().",
-                stacklevel=2,
-            )
+        self._warn_if_not_started("submit")
         resolved_thread_id = thread_id if thread_id is not None else uuid4().hex
-        job_id = uuid4().hex
-        self._index.create(
-            job_id=job_id, thread_id=resolved_thread_id, graph_input=graph_input
+        return await self._enqueue_run(
+            thread_id=resolved_thread_id, payload=graph_input, graph_input=graph_input
         )
+
+    async def resume(self, job_id: str, value: Any) -> RunHandle:
+        """Resume the interrupted run ``job_id`` with ``value``.
+
+        ``value`` becomes the return value of the ``interrupt()`` call the
+        graph is paused on. Creates a **new** run on the same ``thread_id``
+        rather than mutating ``job_id``'s record (DESIGN.md sec 5: job
+        history stays immutable and auditable).
+
+        Raises :class:`UnknownRunError` if ``job_id`` is unknown, or
+        :class:`ValueError` if that run isn't currently ``interrupted``.
+        """
+        self._warn_if_not_started("resume")
+        record = self._index.get(job_id)
+        if record is None:
+            raise UnknownRunError(job_id)
+        if record.state != RunState.INTERRUPTED:
+            raise ValueError(
+                f"run {job_id!r} is not interrupted (state={record.state.value}); "
+                "only an interrupted run can be resumed"
+            )
+        return await self._enqueue_run(
+            thread_id=record.thread_id, payload=Command(resume=value), graph_input=None
+        )
+
+    async def _enqueue_run(
+        self, *, thread_id: str, payload: Any, graph_input: dict[str, Any] | None
+    ) -> RunHandle:
+        job_id = uuid4().hex
+        self._index.create(job_id=job_id, thread_id=thread_id, graph_input=graph_input)
         job = self._errand.enqueue(
-            self._task_name,
-            job_id=job_id,
-            graph_input=graph_input,
-            thread_id=resolved_thread_id,
+            self._task_name, job_id=job_id, payload=payload, thread_id=thread_id
         )
         record = self._index.get(job_id)
         assert record is not None
         record.errand_job_id = job.id
-        return RunHandle(job_id=job_id, thread_id=resolved_thread_id)
+        return RunHandle(job_id=job_id, thread_id=thread_id)
+
+    def _warn_if_not_started(self, method: str) -> None:
+        if self._started:
+            return
+        warnings.warn(
+            f"GraphRunner.{method}() called before startup() -- the run "
+            "will stay queued forever with no worker to pick it up. "
+            "Call `await runner.startup()`, or pass `lifespan=runner.lifespan` "
+            "to FastAPI(...) if you're using mount_graph().",
+            stacklevel=3,
+        )
 
     async def status(self, job_id: str) -> RunStatus:
         """Return the current status of the run identified by ``job_id``.
@@ -189,6 +220,45 @@ class GraphRunner:
             error=record.error,
         )
 
+    async def thread_state(self, thread_id: str) -> dict[str, Any]:
+        """Return the graph's current state for ``thread_id``.
+
+        ``{"values", "next", "interrupt"}`` -- straight from
+        ``graph.aget_state``, the same source :meth:`_run_graph` uses to
+        detect an interrupt. A ``thread_id`` this runner never submitted to
+        isn't an error (LangGraph itself doesn't distinguish "unknown
+        thread" from "empty thread"): you get back empty values and no next
+        steps, same as a thread that hasn't started running yet.
+        """
+        snapshot = await self._graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        return {
+            "values": snapshot.values,
+            "next": list(snapshot.next),
+            "interrupt": _extract_interrupts(snapshot),
+        }
+
+    async def thread_history(
+        self, thread_id: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return ``thread_id``'s checkpoint history, newest first.
+
+        Each entry is ``{"checkpoint_id", "values", "next"}``, straight from
+        ``graph.aget_state_history``.
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+        history = []
+        async for snapshot in self._graph.aget_state_history(config, limit=limit):
+            history.append(
+                {
+                    "checkpoint_id": snapshot.config["configurable"]["checkpoint_id"],
+                    "values": snapshot.values,
+                    "next": list(snapshot.next),
+                }
+            )
+        return history
+
     async def _sync_queued_record(self, record: RunRecord) -> None:
         # The task function itself drives record.state from RUNNING onward
         # (see _run_graph) -- the one gap is a job that never got to run at
@@ -204,7 +274,7 @@ class GraphRunner:
             record.error = job.error
 
     async def _run_graph(
-        self, *, job_id: str, graph_input: dict[str, Any] | None, thread_id: str
+        self, *, job_id: str, payload: Any, thread_id: str
     ) -> dict[str, Any]:
         record = self._index.get(job_id)
         assert record is not None
@@ -212,9 +282,7 @@ class GraphRunner:
 
         config = {"configurable": {"thread_id": thread_id}}
         try:
-            result: dict[str, Any] = await self._graph.ainvoke(
-                graph_input, config=config
-            )
+            result: dict[str, Any] = await self._graph.ainvoke(payload, config=config)
         except Exception as exc:
             record.state = RunState.FAILED
             record.error = f"{type(exc).__name__}: {exc}"

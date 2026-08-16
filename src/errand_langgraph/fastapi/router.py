@@ -41,19 +41,28 @@ def mount_graph(
     returned runner's own :meth:`~errand_langgraph.GraphRunner.submit` warns
     if you forget).
 
-    Two endpoints, mounted under ``prefix``:
+    Endpoints, mounted under ``prefix``:
 
     - ``POST {prefix}/runs`` -- body validated against the graph's own
       input schema when introspectable (see ``schemas.py``), 202, returns
       ``{"job_id", "thread_id"}``.
     - ``GET {prefix}/runs/{job_id}`` -- current :class:`RunStatus`, 404 if
       unknown.
+    - ``POST {prefix}/runs/{job_id}/resume`` -- body is the raw value
+      ``interrupt()`` should return, any JSON shape. 202 with a fresh
+      ``{"job_id", "thread_id"}`` (DESIGN.md sec 5: resuming creates a new
+      run, never mutates the interrupted one). 404 if ``job_id`` is
+      unknown, 409 if it isn't currently ``interrupted``.
+    - ``GET {prefix}/threads/{thread_id}/state`` -- current graph state for
+      the thread.
+    - ``GET {prefix}/threads/{thread_id}/history`` -- checkpoint history,
+      newest first, optional ``?limit=``.
 
     Raises ``ImportError`` with an actionable message (``pip install
     errand-langgraph[fastapi]``) if FastAPI isn't installed.
     """
     try:
-        from fastapi import APIRouter, HTTPException
+        from fastapi import APIRouter, Body, HTTPException
         from pydantic import BaseModel
     except ImportError as exc:
         raise ImportError(
@@ -99,6 +108,26 @@ def mount_graph(
         except UnknownRunError as exc:
             raise HTTPException(status_code=404, detail="Run not found") from exc
         return _serialize_status(status)
+
+    @router.post("/runs/{job_id}/resume", status_code=202)
+    async def resume_run(job_id: str, value: Any = Body(...)) -> dict[str, Any]:
+        try:
+            handle = await runner.resume(job_id, value)
+        except UnknownRunError as exc:
+            raise HTTPException(status_code=404, detail="Run not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"job_id": handle.job_id, "thread_id": handle.thread_id}
+
+    @router.get("/threads/{thread_id}/state")
+    async def get_thread_state(thread_id: str) -> dict[str, Any]:
+        return await runner.thread_state(thread_id)
+
+    @router.get("/threads/{thread_id}/history")
+    async def get_thread_history(
+        thread_id: str, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        return await runner.thread_history(thread_id, limit=limit)
 
     app.include_router(router, prefix=prefix)
     return runner

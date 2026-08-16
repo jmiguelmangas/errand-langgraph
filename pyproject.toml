@@ -74,6 +74,11 @@ extend-exclude = ["*.md"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C90", "ASYNC", "RUF", "PT", "C4"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's own idiom: Body(...)/Query(...) etc. as call-in-default is how
+# it declares request parameters, not a mutable-default bug.
+"src/errand_langgraph/fastapi/router.py" = ["B008"]
+
 [tool.mypy]
 strict = true
 files = ["src"]

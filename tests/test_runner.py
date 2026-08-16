@@ -166,3 +166,99 @@ async def test_status_reconciles_a_job_shutdown_marked_failed_before_running() -
 
     assert status.state == RunState.FAILED
     assert status.error == "Cancelled during shutdown"
+
+
+async def test_full_hitl_cycle_invoke_interrupt_resume_succeeded() -> None:
+    # The integration test DESIGN.md sec 8 asks for: a real compiled graph
+    # + InMemorySaver, not mocked at the LangGraph layer.
+    runner = GraphRunner(build_approval_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1, "approved": False})
+        interrupted = await _wait_for(runner, handle.job_id, RunState.INTERRUPTED)
+        assert interrupted.interrupt is not None
+
+        resumed = await runner.resume(handle.job_id, True)
+        assert resumed.thread_id == handle.thread_id
+        assert resumed.job_id != handle.job_id
+
+        final = await _wait_for(runner, resumed.job_id, RunState.SUCCEEDED)
+        assert final.result == {"value": 4, "approved": True}
+
+        # The original job's own record is untouched -- history stays
+        # immutable (DESIGN.md sec 5), the resume created a new job instead.
+        original = await runner.status(handle.job_id)
+        assert original.state == RunState.INTERRUPTED
+    finally:
+        await runner.shutdown()
+
+
+async def test_resume_unknown_job_id_raises() -> None:
+    runner = GraphRunner(build_approval_graph())
+    with pytest.raises(UnknownRunError):
+        await runner.resume("does-not-exist", True)
+
+
+async def test_resume_a_non_interrupted_run_raises() -> None:
+    runner = GraphRunner(build_counter_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+        await _wait_for(runner, handle.job_id, RunState.SUCCEEDED)
+
+        with pytest.raises(ValueError, match="not interrupted"):
+            await runner.resume(handle.job_id, True)
+    finally:
+        await runner.shutdown()
+
+
+async def test_resume_before_startup_warns() -> None:
+    runner = GraphRunner(build_approval_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1, "approved": False})
+        await _wait_for(runner, handle.job_id, RunState.INTERRUPTED)
+    finally:
+        await runner.shutdown()
+
+    with pytest.warns(UserWarning, match="called before startup"):
+        await runner.resume(handle.job_id, True)
+
+
+async def test_thread_state_reflects_interrupted_graph() -> None:
+    runner = GraphRunner(build_approval_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1, "approved": False})
+        await _wait_for(runner, handle.job_id, RunState.INTERRUPTED)
+
+        state = await runner.thread_state(handle.thread_id)
+        assert state["values"] == {"value": 2, "approved": False}
+        assert state["next"] == ["ask_for_approval"]
+        assert state["interrupt"][0]["value"] == {"question": "approve?", "value": 2}
+    finally:
+        await runner.shutdown()
+
+
+async def test_thread_state_for_unknown_thread_is_empty() -> None:
+    runner = GraphRunner(build_counter_graph())
+    state = await runner.thread_state("never-used-thread")
+    assert state == {"values": {}, "next": [], "interrupt": None}
+
+
+async def test_thread_history_lists_checkpoints_newest_first() -> None:
+    runner = GraphRunner(build_counter_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1}, thread_id="t-history")
+        await _wait_for(runner, handle.job_id, RunState.SUCCEEDED)
+
+        history = await runner.thread_history(handle.thread_id)
+        assert len(history) >= 2
+        assert history[0]["values"] == {"value": 2}
+        assert all("checkpoint_id" in entry for entry in history)
+
+        limited = await runner.thread_history(handle.thread_id, limit=1)
+        assert len(limited) == 1
+    finally:
+        await runner.shutdown()
