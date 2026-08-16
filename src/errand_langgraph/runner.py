@@ -15,6 +15,14 @@ checkpoint" retries (DESIGN.md sec 7, implemented starting M5). The
 internal task this module registers therefore always uses
 ``max_retries=0``: errand attempts it exactly once, and never retries it
 itself.
+
+Execution goes through ``graph.astream(..., stream_mode="values")``, not
+``ainvoke`` -- verified each chunk in "values" mode is the *full*
+accumulated state after that step (not a per-node delta), so the last
+chunk is exactly what ``ainvoke`` would have returned, letting one pass
+serve both :meth:`GraphRunner.status`'s result and
+:meth:`GraphRunner.stream_events`'s events without running the graph
+twice.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from uuid import uuid4
 from errand_jobs import Errand, JobStatus
 from langgraph.types import Command
 
+from .events import EventBus
 from .state import RunIndex, RunRecord, RunState
 
 if TYPE_CHECKING:
@@ -122,6 +131,7 @@ class GraphRunner:
             self._graph = graph.compile(checkpointer=checkpointer)
 
         self._index = RunIndex()
+        self._events = EventBus()
         self._errand = errand if errand is not None else Errand()
         self._task_name = f"errand_langgraph.run.{uuid4().hex}"
         self._started = False
@@ -220,6 +230,22 @@ class GraphRunner:
             error=record.error,
         )
 
+    def stream_events(self, job_id: str) -> AsyncIterator[dict[str, Any]]:
+        """Subscribe to ``job_id``'s stream of graph events (DESIGN.md sec 6.3).
+
+        Yields buffered-then-live events published by :meth:`_run_graph` as
+        the graph executes, and returns once the run is over -- whatever
+        state it ended in. Each event is ``{"seq", "type", "data"}``, where
+        ``data`` is a full state snapshot (langgraph's ``stream_mode="values"``).
+
+        Doesn't validate that ``job_id`` is known -- callers that want a 404
+        for an unknown job (like ``mount_graph``'s SSE route) should call
+        :meth:`status` first. A ``job_id`` that's simply queued and hasn't
+        produced its first event yet is not an error: the subscriber just
+        waits, same as one that arrives mid-run.
+        """
+        return self._events.subscribe(job_id)
+
     async def thread_state(self, thread_id: str) -> dict[str, Any]:
         """Return the graph's current state for ``thread_id``.
 
@@ -281,11 +307,17 @@ class GraphRunner:
         record.state = RunState.RUNNING
 
         config = {"configurable": {"thread_id": thread_id}}
+        last_values: dict[str, Any] = {}
         try:
-            result: dict[str, Any] = await self._graph.ainvoke(payload, config=config)
+            async for chunk in self._graph.astream(
+                payload, config=config, stream_mode="values"
+            ):
+                last_values = chunk
+                self._events.publish(job_id, {"type": "values", "data": chunk})
         except Exception as exc:
             record.state = RunState.FAILED
             record.error = f"{type(exc).__name__}: {exc}"
+            self._events.close(job_id)
             raise
 
         snapshot = await self._graph.aget_state(config)
@@ -294,8 +326,11 @@ class GraphRunner:
             record.interrupt = _extract_interrupts(snapshot)
         else:
             record.state = RunState.SUCCEEDED
-            record.result = result
-        return result
+            record.result = {
+                k: v for k, v in last_values.items() if k != "__interrupt__"
+            }
+        self._events.close(job_id)
+        return last_values
 
     async def startup(self) -> None:
         """Start the underlying errand worker pool. Call once, before submitting."""

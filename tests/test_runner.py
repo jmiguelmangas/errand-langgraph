@@ -262,3 +262,51 @@ async def test_thread_history_lists_checkpoints_newest_first() -> None:
         assert len(limited) == 1
     finally:
         await runner.shutdown()
+
+
+async def test_stream_events_yields_values_chunks_then_ends() -> None:
+    runner = GraphRunner(build_counter_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+
+        events = [event async for event in runner.stream_events(handle.job_id)]
+
+        assert [e["data"] for e in events] == [{"value": 1}, {"value": 2}]
+        assert [e["type"] for e in events] == ["values", "values"]
+        status = await runner.status(handle.job_id)
+        assert status.state == RunState.SUCCEEDED
+    finally:
+        await runner.shutdown()
+
+
+async def test_stream_events_closes_on_failure() -> None:
+    runner = GraphRunner(build_failing_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1})
+
+        events = [event async for event in runner.stream_events(handle.job_id)]
+
+        # boom's node never emits a values chunk of its own -- only the
+        # initial input state does, before the exception.
+        assert [e["data"] for e in events] == [{"value": 1}]
+        status = await runner.status(handle.job_id)
+        assert status.state == RunState.FAILED
+    finally:
+        await runner.shutdown()
+
+
+async def test_stream_events_closes_on_interrupt() -> None:
+    runner = GraphRunner(build_approval_graph())
+    await runner.startup()
+    try:
+        handle = await runner.submit({"value": 1, "approved": False})
+
+        events = [event async for event in runner.stream_events(handle.job_id)]
+
+        assert events[-1]["data"]["value"] == 2
+        status = await runner.status(handle.job_id)
+        assert status.state == RunState.INTERRUPTED
+    finally:
+        await runner.shutdown()

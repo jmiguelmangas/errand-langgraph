@@ -2,12 +2,13 @@
 
 Run [LangGraph](https://github.com/langchain-ai/langgraph) graphs as
 [errand](https://github.com/jmiguelmangas/errand) jobs: background execution
-with status polling, human-in-the-loop resume, and an auto-generated FastAPI
-router — no Celery, no separate broker.
+with status polling, human-in-the-loop resume, event streaming, and an
+auto-generated FastAPI router — no Celery, no separate broker.
 
-> **Status:** early development, not yet released to PyPI. 0.1 (submit/status
-> + the FastAPI router) and 0.2 (human-in-the-loop resume) are implemented;
-> streaming and smart retries are in progress — see the roadmap below.
+> **Status:** early development, not yet released to PyPI. 0.1
+> (submit/status + the FastAPI router), 0.2 (human-in-the-loop resume), and
+> 0.3 (SSE streaming) are implemented; smart retries are in progress — see
+> the roadmap below.
 
 **Requires Python 3.11+.** `interrupt()` is broken under Python 3.10 in
 recent `langgraph` releases (a real, verified upstream bug, not a guess —
@@ -65,6 +66,7 @@ This mounts five endpoints:
 | `POST` | `/agent/runs/{job_id}/resume` | Resume an `interrupted` run. Body is the raw value `interrupt()` should return (any JSON). Returns a **new** `{"job_id", "thread_id"}` on the same thread, 202. 404 if `job_id` is unknown, 409 if it isn't `interrupted`. |
 | `GET` | `/agent/threads/{thread_id}/state` | Current graph state for the thread: `{"values", "next", "interrupt"}`. |
 | `GET` | `/agent/threads/{thread_id}/history` | Checkpoint history, newest first, optional `?limit=`. |
+| `GET` | `/agent/runs/{job_id}/events` | `text/event-stream` of the run's graph state as it executes — one event per completed node, `{"seq", "type", "data"}`. 404 if `job_id` is unknown. **In-process only**, see below. |
 
 ```bash
 curl -X POST localhost:8000/agent/runs -d '{"messages": [["user", "hi"]]}'
@@ -93,22 +95,32 @@ resumed = await runner.resume(handle.job_id, value=True)
 await runner.shutdown()
 ```
 
-See `examples/basic/` for a runnable submit/poll version and
-`examples/hitl/` for the full interrupt/resume cycle (server + client, no
-LLM calls, both actually run end to end).
+See `examples/basic/` for a runnable submit/poll version, `examples/hitl/`
+for the full interrupt/resume cycle, and `examples/streaming/` for SSE —
+all three actually run end to end (server + client, no LLM calls).
 
 **Don't forget startup.** Nothing runs submitted work without a running
 worker pool — wire `lifespan=runner.lifespan` into `FastAPI(...)` (as above)
 or call `await runner.startup()` yourself before submitting. `submit()`/
 `resume()` warn if you forget.
 
+**Streaming is in-process only.** `GET /runs/{id}/events` reads from an
+in-memory pubsub inside the worker that's actually running the graph — it
+only works when the client's request and that worker share this process.
+Behind a load balancer with multiple worker processes, the SSE request has
+to land on the specific process that owns the run; this package doesn't
+route that for you. Polling `GET /runs/{id}` always works regardless of
+process topology — reach for streaming only where the single-process
+constraint is already true (which is most `errand`-based deployments, but
+not all).
+
 ## Roadmap
 
 - **0.1 (done):** `GraphRunner.submit`/`status`, `mount_graph` with polling.
 - **0.2 (done):** human-in-the-loop — `interrupt()` detection, `resume()`,
   `POST /runs/{id}/resume`, thread state/history endpoints.
-- **0.3:** SSE streaming of graph events (in-process only — documented
-  limitation, not hidden).
+- **0.3 (done):** SSE streaming of graph events (in-process only —
+  documented above, not hidden).
 - **0.4:** smart retries — resume from the last checkpoint instead of
   re-running the graph (and re-paying for every LLM call) from scratch.
 
