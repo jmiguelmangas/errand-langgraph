@@ -17,10 +17,11 @@ with status polling, human-in-the-loop resume, event streaming, smart
 retries, and an auto-generated FastAPI router — no Celery, no separate
 broker.
 
-> **Status:** early development, not yet released to PyPI. 0.1
-> (submit/status + the FastAPI router), 0.2 (human-in-the-loop resume), 0.3
-> (SSE streaming), and 0.4 (smart retries) are all implemented — see the
-> roadmap below. Release polish (0.5) is what's left before a PyPI publish.
+> **Status:** early development, not yet released to PyPI. Submit/status,
+> the FastAPI router, human-in-the-loop resume, SSE streaming, and smart
+> retries are all implemented and tested (100% coverage) — see
+> [`CHANGELOG.md`](https://github.com/jmiguelmangas/errand-langgraph/blob/main/CHANGELOG.md)
+> and the roadmap below. Release polish is what's left before a PyPI publish.
 
 **Requires Python 3.11+.** `interrupt()` is broken under Python 3.10 in
 recent `langgraph` releases (a real, verified upstream bug, not a guess —
@@ -75,7 +76,7 @@ app = FastAPI(lifespan=runner.lifespan)  # starts/drains the worker pool
 mount_graph(app, runner, prefix="/agent")
 ```
 
-This mounts five endpoints:
+This mounts six endpoints:
 
 | Method | Path | What |
 |---|---|---|
@@ -161,14 +162,24 @@ not all).
 
 ## Roadmap
 
-- **0.1 (done):** `GraphRunner.submit`/`status`, `mount_graph` with polling.
-- **0.2 (done):** human-in-the-loop — `interrupt()` detection, `resume()`,
+The full feature set below is implemented, tested, and ready — what's left
+is the PyPI trusted-publisher setup (a one-time manual step) and tagging a
+release. See
+[`CHANGELOG.md`](https://github.com/jmiguelmangas/errand-langgraph/blob/main/CHANGELOG.md)
+for what ships in the first version.
+
+- **Done:** `GraphRunner.submit`/`status`, `mount_graph` with polling.
+- **Done:** human-in-the-loop — `interrupt()` detection, `resume()`,
   `POST /runs/{id}/resume`, thread state/history endpoints.
-- **0.3 (done):** SSE streaming of graph events (in-process only —
-  documented above, not hidden).
-- **0.4 (done):** smart retries — error classification, backoff with full
+- **Done:** SSE streaming of graph events (in-process only — documented
+  above, not hidden).
+- **Done:** smart retries — error classification, backoff with full
   jitter, resume from the last checkpoint instead of re-running the graph
   (and re-paying for every LLM call) from scratch.
+
+Not yet built: cancelling an in-flight run, metrics/observability, and a
+registry for mounting more than one graph under a single FastAPI app
+(today it's one `mount_graph` call per graph).
 
 ## License
 

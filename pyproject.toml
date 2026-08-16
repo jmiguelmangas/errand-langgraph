@@ -64,7 +64,7 @@ build-backend = "hatchling.build"
 packages = ["src/errand_langgraph"]
 
 [tool.hatch.build.targets.sdist]
-exclude = [".github/", "uv.lock"]
+exclude = ["assets/", ".github/", "uv.lock"]
 
 [tool.ruff]
 line-length = 88
