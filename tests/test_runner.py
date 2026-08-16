@@ -97,6 +97,12 @@ async def test_status_unknown_job_id_raises() -> None:
         await runner.status("does-not-exist")
 
 
+async def test_submit_before_startup_warns() -> None:
+    runner = GraphRunner(build_counter_graph())
+    with pytest.warns(UserWarning, match="called before startup"):
+        await runner.submit({"value": 1})
+
+
 async def test_compiled_graph_with_checkpointer_kwarg_raises() -> None:
     with pytest.raises(ValueError, match="already compiled"):
         GraphRunner(build_counter_graph(), checkpointer=object())

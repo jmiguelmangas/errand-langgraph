@@ -7,16 +7,23 @@ execution/checkpoint/interrupt machinery, not any model.
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any
 
+# typing_extensions, not typing: Pydantic v2 requires
+# typing_extensions.TypedDict on Python < 3.12 for schema introspection to
+# work at all (see fastapi/schemas.py's module docstring -- a real CI
+# failure caught this, not a guess).
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
+from typing_extensions import NotRequired, TypedDict  # noqa: UP035
 
 
 class CounterState(TypedDict):
     value: int
-    approved: bool
+    # Only the approval graph's nodes touch this -- NotRequired so the
+    # counter/failing graphs' schema-derived request bodies don't demand it.
+    approved: NotRequired[bool]
 
 
 def build_counter_graph(*, with_checkpointer: bool = True) -> Any:

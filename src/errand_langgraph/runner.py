@@ -19,6 +19,7 @@ itself.
 
 from __future__ import annotations
 
+import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -122,6 +123,7 @@ class GraphRunner:
         self._index = RunIndex()
         self._errand = errand if errand is not None else Errand()
         self._task_name = f"errand_langgraph.run.{uuid4().hex}"
+        self._started = False
 
         # A plain closure, not the bound method directly: errand's @task
         # sets an attribute on the callable it registers, which bound
@@ -145,6 +147,14 @@ class GraphRunner:
         rather than starting a new one (resuming after an ``interrupt()``
         uses :meth:`resume` instead, not a second call to this method).
         """
+        if not self._started:
+            warnings.warn(
+                "GraphRunner.submit() called before startup() -- the run "
+                "will stay queued forever with no worker to pick it up. "
+                "Call `await runner.startup()`, or pass `lifespan=runner.lifespan` "
+                "to FastAPI(...) if you're using mount_graph().",
+                stacklevel=2,
+            )
         resolved_thread_id = thread_id if thread_id is not None else uuid4().hex
         job_id = uuid4().hex
         self._index.create(
@@ -222,13 +232,18 @@ class GraphRunner:
     async def startup(self) -> None:
         """Start the underlying errand worker pool. Call once, before submitting."""
         await self._errand.startup()
+        self._started = True
 
     async def shutdown(self) -> None:
         """Stop the underlying errand worker pool, draining in-flight runs."""
         await self._errand.shutdown()
+        self._started = False
 
     @asynccontextmanager
     async def lifespan(self, app: Any) -> AsyncIterator[None]:
         """Pass to ``FastAPI(lifespan=runner.lifespan)`` to wire startup/shutdown."""
-        async with self._errand.lifespan(app):
+        await self.startup()
+        try:
             yield
+        finally:
+            await self.shutdown()
