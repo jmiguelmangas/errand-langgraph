@@ -181,3 +181,53 @@ def test_get_thread_history_lists_checkpoints() -> None:
             f"/agent/threads/{thread_id}/history", params={"limit": 1}
         ).json()
         assert len(limited) == 1
+
+
+def _parse_sse(body: str) -> list[dict[str, Any]]:
+    import json
+
+    return [
+        json.loads(frame.removeprefix("data: "))
+        for frame in body.strip().split("\n\n")
+        if frame
+    ]
+
+
+def test_stream_run_events_via_http() -> None:
+    app, _runner = _build_app(build_counter_graph())
+    with TestClient(app) as client:
+        submitted = client.post("/agent/runs", json={"value": 1}).json()
+
+        response = client.get(f"/agent/runs/{submitted['job_id']}/events")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+
+        events = _parse_sse(response.text)
+        assert [e["data"] for e in events] == [{"value": 1}, {"value": 2}]
+
+
+def test_stream_run_events_unknown_job_id_is_404() -> None:
+    app, _runner = _build_app(build_counter_graph())
+    with TestClient(app) as client:
+        response = client.get("/agent/runs/does-not-exist/events")
+        assert response.status_code == 404
+
+
+def test_stream_run_events_serializes_interrupts() -> None:
+    app, _runner = _build_app(build_approval_graph())
+    with TestClient(app) as client:
+        submitted = client.post(
+            "/agent/runs", json={"value": 1, "approved": False}
+        ).json()
+
+        response = client.get(f"/agent/runs/{submitted['job_id']}/events")
+        events = _parse_sse(response.text)
+
+        last = events[-1]["data"]
+        assert last["value"] == 2
+        # __interrupt__ carries langgraph's Interrupt dataclass -- confirms
+        # jsonable_encoder actually ran, not just plain json.dumps.
+        assert last["__interrupt__"][0]["value"] == {
+            "question": "approve?",
+            "value": 2,
+        }
