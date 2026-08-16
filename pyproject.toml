@@ -1,6 +1,6 @@
 [project]
 name = "errand-langgraph"
-version = "0.1.0"
+version = "0.1.1"
 description = "Run LangGraph graphs as errand jobs — stateful background execution, HITL resume, and an auto-generated FastAPI router."
 readme = "README.md"
 requires-python = ">=3.11"

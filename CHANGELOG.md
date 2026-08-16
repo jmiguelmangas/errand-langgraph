@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1]
+
+### Fixed
+
+- README's PyPI/Python-version/license badges rendered as "package or
+  version not found" on the PyPI project page — written before the
+  package existed on PyPI (days before the actual first publish), and
+  PyPI freezes each version's README at upload time, so the 0.1.0 upload
+  carried the stale badge URLs regardless of shields.io itself already
+  being correct. Same class of issue as `errand`'s own 0.1.0→0.1.1 fix
+  (that one was relative image paths; this one is upload-time freshness),
+  same fix shape: re-upload via a patch release.
+
 ## [0.1.0]
 
 Initial release. Built through internal milestones 0.1–0.4 (see DESIGN.md,
