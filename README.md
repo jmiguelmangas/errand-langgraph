@@ -15,6 +15,14 @@ recent `langgraph` releases (a real, verified upstream bug, not a guess —
 in plain `langgraph` with no `errand-langgraph` involved). Since
 human-in-the-loop is this package's flagship feature, 3.10 isn't supported.
 
+**Define your graph's state with `typing_extensions.TypedDict`, not
+`typing.TypedDict`.** On Python < 3.12, Pydantic v2 can't introspect a
+`typing.TypedDict` (`PydanticUserError`) — `mount_graph`'s request-body
+validation silently falls back to an unvalidated `dict[str, Any]` if you get
+this wrong (with a warning telling you why). `from typing_extensions import
+TypedDict, NotRequired` avoids it entirely and works the same on every
+supported Python version.
+
 ## Install
 
 ```bash

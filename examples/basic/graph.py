@@ -7,9 +7,13 @@ node sleeps briefly, standing in for an LLM call or a slow tool.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, NotRequired, TypedDict
+from typing import Any
 
+# typing_extensions, not typing: Pydantic v2 needs it for TypedDict schema
+# introspection to work on Python < 3.12 -- see errand_langgraph's
+# fastapi/schemas.py docstring.
 from langgraph.graph import END, START, StateGraph
+from typing_extensions import NotRequired, TypedDict  # noqa: UP035
 
 
 class AgentState(TypedDict):
