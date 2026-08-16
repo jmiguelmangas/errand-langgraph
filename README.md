@@ -17,9 +17,9 @@ with status polling, human-in-the-loop resume, event streaming, smart
 retries, and an auto-generated FastAPI router — no Celery, no separate
 broker.
 
-> **Status: 0.1.1, published.** Submit/status, the FastAPI router,
+> **Status: published on PyPI.** Submit/status, the FastAPI router,
 > human-in-the-loop resume, SSE streaming, and smart retries are all
-> implemented, tested (100% coverage), and live on PyPI — see
+> implemented and tested (100% coverage) — see
 > [`CHANGELOG.md`](https://github.com/jmiguelmangas/errand-langgraph/blob/main/CHANGELOG.md)
 > for what shipped in each version.
 

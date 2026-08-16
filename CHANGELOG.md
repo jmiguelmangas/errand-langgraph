@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2]
+
+### Fixed
+
+- README's status banner still said "not yet released to PyPI" / "release
+  polish is what's left" after 0.1.0 was already published — leftover
+  pre-publish language the 0.1.1 fix didn't catch because that pass only
+  addressed the one thing reported (badge URLs), not a full read-through.
+  Reworded to be version-agnostic (`"Status: published on PyPI"` instead
+  of hardcoding a version number that goes stale every release) so this
+  class of staleness is less likely to recur.
+
+### Changed
+
+- `pyproject.toml`'s `description` now mentions streaming and retries
+  (it only listed HITL before, from when 0.1 was the only milestone
+  written up). `Development Status` classifier bumped `3 - Alpha` →
+  `4 - Beta` — the full planned feature set is implemented, tested at
+  100% coverage, and has now been published twice.
+
 ## [0.1.1]
 
 ### Fixed
