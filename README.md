@@ -17,11 +17,11 @@ with status polling, human-in-the-loop resume, event streaming, smart
 retries, and an auto-generated FastAPI router — no Celery, no separate
 broker.
 
-> **Status:** early development, not yet released to PyPI. Submit/status,
-> the FastAPI router, human-in-the-loop resume, SSE streaming, and smart
-> retries are all implemented and tested (100% coverage) — see
+> **Status: 0.1.1, published.** Submit/status, the FastAPI router,
+> human-in-the-loop resume, SSE streaming, and smart retries are all
+> implemented, tested (100% coverage), and live on PyPI — see
 > [`CHANGELOG.md`](https://github.com/jmiguelmangas/errand-langgraph/blob/main/CHANGELOG.md)
-> and the roadmap below. Release polish is what's left before a PyPI publish.
+> for what shipped in each version.
 
 **Requires Python 3.11+.** `interrupt()` is broken under Python 3.10 in
 recent `langgraph` releases (a real, verified upstream bug, not a guess —
@@ -162,11 +162,9 @@ not all).
 
 ## Roadmap
 
-The full feature set below is implemented, tested, and ready — what's left
-is the PyPI trusted-publisher setup (a one-time manual step) and tagging a
-release. See
+The full feature set below is implemented, tested, and published. See
 [`CHANGELOG.md`](https://github.com/jmiguelmangas/errand-langgraph/blob/main/CHANGELOG.md)
-for what ships in the first version.
+for what shipped in each version.
 
 - **Done:** `GraphRunner.submit`/`status`, `mount_graph` with polling.
 - **Done:** human-in-the-loop — `interrupt()` detection, `resume()`,
